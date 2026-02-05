@@ -34,7 +34,7 @@ def register_for_autostart():
 
         winreg.SetValueEx(key, app_name, 0, winreg.REG_SZ, f'"{exe_path}"')
         winreg.CloseKey(key)
-        print(f"✅ Successfully added '{app_name}' to system-wide startup.")
+        print(f"Successfully added '{app_name}' to system-wide startup.")
 
     except Exception as e:
         print(f"Failed to add to registry: {e}")
